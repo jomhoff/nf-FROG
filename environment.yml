@@ -12,7 +12,5 @@ dependencies:
   - samtools>=1.17
   - bcftools>=1.17
   - htslib
+  - freebayes>=1.3.7
   - bedtools
-  - gatk4
-  - r-base
-  - r-gsalib

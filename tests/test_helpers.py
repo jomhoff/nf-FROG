@@ -43,10 +43,10 @@ class HelperTests(unittest.TestCase):
                 output.write(
                     "##fileformat=VCFv4.2\n"
                     "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n"
-                    "chr1\t1\t.\tA\t<NON_REF>\t.\t.\tEND=3\tGT:DP:GQ:MIN_DP\t0/0:10:50:10\n"
-                    "chr1\t4\t.\tC\t<NON_REF>\t.\t.\tEND=5\tGT:DP:GQ:MIN_DP\t0/0:1:50:1\n"
-                    "chr1\t7\t.\tG\tA,<NON_REF>\t50\t.\t.\tGT:AD:DP:GQ\t0/1:5,5,0:10:50\n"
-                    "chr1\t8\t.\tT\t<NON_REF>\t.\t.\tEND=10\tGT:DP:GQ:MIN_DP\t0/0:10:5:10\n"
+                    "chr1\t1\t.\tA\t<*>\t0\t.\tEND=3\tDP:MIN_DP:RO:AO\t10:10:10:0\n"
+                    "chr1\t4\t.\tC\t<*>\t0\t.\tEND=5\tDP:MIN_DP:RO:AO\t1:1:1:0\n"
+                    "chr1\t7\t.\tG\tA\t50\t.\tAO=5;QA=200;MQM=60;SAF=3;SAR=2;RPL=2;RPR=3\tGT:DP:RO:AO\t0/1:10:5:5\n"
+                    "chr1\t8\t.\tT\t<*>\t0\t.\tEND=10\tDP:MIN_DP:RO:AO\t10:10:10:0\n"
                 )
             gvcf_mask = work / "gvcf.bed"
             self.run_tool(
@@ -57,26 +57,41 @@ class HelperTests(unittest.TestCase):
                 fai,
                 "--chromosome",
                 "chr1",
-                "--thresholds",
-                thresholds,
                 "--output",
                 gvcf_mask,
                 "--stats",
                 work / "gvcf.tsv",
             )
             self.assertIn("GVCF_ABSENT", gvcf_mask.read_text())
-            self.assertIn("LOW_DEPTH", gvcf_mask.read_text())
-            self.assertIn("LOW_GQ", gvcf_mask.read_text())
+
+            depth_mask = work / "depth.bed"
+            depth_rows = "".join(
+                f"chr1\t{position}\t{1 if position in (4, 5) else 10}\n"
+                for position in range(1, 11)
+            )
+            self.run_tool(
+                "depth_mask.py",
+                "--chromosome",
+                "chr1",
+                "--thresholds",
+                thresholds,
+                "--output",
+                depth_mask,
+                "--stats",
+                work / "depth.tsv",
+                input_text=depth_rows,
+            )
+            self.assertEqual(depth_mask.read_text(), "chr1\t3\t5\tLOW_DEPTH\n")
 
             vcf = work / "sample.vcf.gz"
             with gzip.open(vcf, "wt") as output:
                 output.write(
                     "##fileformat=VCFv4.2\n"
                     "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample\n"
-                    "chr1\t1\t.\tA\tG\t50\tPASS\tQD=10;MQ=60;FS=1;SOR=1;ReadPosRankSum=0;MQRankSum=0\tGT:AD:DP:GQ\t1/1:0,10:10:50\n"
-                    "chr1\t2\t.\tC\tT\t50\tPASS\tQD=10;MQ=60;FS=1;SOR=1;ReadPosRankSum=0;MQRankSum=0\tGT:AD:DP:GQ\t0/1:5,5:10:50\n"
-                    "chr1\t3\t.\tG\tA\t10\tPASS\tQD=1;MQ=20;FS=100;SOR=5;ReadPosRankSum=-20;MQRankSum=-20\tGT:AD:DP:GQ\t1/1:0,10:10:50\n"
-                    "chr1\t4\t.\tT\tTA\t50\tPASS\tQD=10;MQ=60;FS=1;SOR=1;ReadPosRankSum=0;MQRankSum=0\tGT:AD:DP:GQ\t1/1:0,10:10:50\n"
+                    "chr1\t1\t.\tA\tG\t50\tPASS\tAO=10;QA=400;MQM=60;SAF=5;SAR=5;RPL=5;RPR=5\tGT:DP:RO:AO\t1/1:10:0:10\n"
+                    "chr1\t2\t.\tC\tT\t50\tPASS\tAO=5;QA=200;MQM=60;SAF=3;SAR=2;RPL=2;RPR=3\tGT:DP:RO:AO\t0/1:10:5:5\n"
+                    "chr1\t3\t.\tG\tA\t10\tPASS\tAO=10;QA=100;MQM=10;SAF=10;SAR=0;RPL=10;RPR=0\tGT:DP:RO:AO\t1/1:10:0:10\n"
+                    "chr1\t4\t.\tT\tTA\t50\tPASS\tAO=10;QA=400;MQM=60;SAF=5;SAR=5;RPL=5;RPR=5\tGT:DP:RO:AO\t1/1:10:0:10\n"
                 )
             output_vcf = work / "iterative.vcf"
             reject_bed = work / "reject.bed"

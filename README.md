@@ -4,8 +4,8 @@
 **G**enomic remapping — builds callable, individual-specific genome consensus
 sequences from paired-end short reads through iterative reference refinement.
 
-It maps each sample to the current personalized reference, calls
-reference-confidence gVCFs with GATK, applies ploidy-aware genotype and variant
+It maps each sample to the current personalized reference, calls variants and
+reference-confidence blocks with FreeBayes, applies ploidy-aware genotype and variant
 filters, updates the mapping reference with confident homozygous SNPs, and
 repeats until the reference converges. A separate final step masks every site
 that cannot be defended as callable and represents passing heterozygous SNPs as
@@ -33,11 +33,12 @@ site in one round remains recoverable in a later round.
 - Multiple samples, lanes, and libraries
 - Per-read-unit read groups
 - Optional read trimming with `fastp`
-- Duplicate marking and library-aware GATK input
+- Duplicate marking with `samtools markdup`
 - Optional Kraken2 contamination screening
 - Ploidy-aware calling by sample, chromosome, and interval
 - Explicit support for ploidy-zero intervals
-- GATK HaplotypeCaller gVCFs and GenotypeGVCFs
+- Parallel per-interval FreeBayes calls with gVCF reference blocks
+- MNP, complex-call, and multiallelic decomposition with `bcftools norm`
 - Robust chromosome-specific depth thresholds recalculated each round
 - Site, genotype, allele-depth, and allele-balance filtering
 - Reason-coded noncallable masks
@@ -64,8 +65,7 @@ round and the terminal filtered VCF. Its noncallable mask is the union of:
 
 - gVCF-absent spans;
 - no-call or missing-depth records;
-- low- and high-depth records;
-- low-GQ records;
+- exact low- and high-depth positions from `samtools depth`;
 - rejected variant sites;
 - ploidy-zero intervals;
 - pre-existing non-ACGT reference sequence;
@@ -79,7 +79,7 @@ confident reference base.
 ### Coordinates and indels
 
 The FASTA products remain SNP-only so their coordinates match the supplied
-reference. Indels and complex variants remain available in the genotyped VCF
+reference. Indels and complex variants remain available in the raw FreeBayes VCF
 and gVCF, but they are not applied to the consensus FASTA.
 
 ### Heterozygous SNPs
@@ -103,7 +103,7 @@ represent phase, heterozygous indels, or structural variants.
 
 The provided environment includes:
 
-- GATK4
+- FreeBayes
 - bwa-mem2
 - samtools
 - bcftools/htslib
@@ -111,7 +111,6 @@ The provided environment includes:
 - fastp
 - Kraken2
 - Python
-- R with `gsalib`
 
 The workflow currently uses Nextflow's recursion-capable `v1` syntax parser.
 Use the supplied launcher, which sets this automatically.
@@ -178,7 +177,7 @@ Optional columns:
 | `library` | Individual ID | Library identifier used for duplicate marking |
 | `karyotype` | `default` | Key used by the ploidy table |
 | `default_ploidy` | `2` | Ploidy where no explicit interval rule exists |
-| `pcr_free` | `false` | Enables GATK's PCR-free indel model |
+| `pcr_free` | `false` | Retained for sample-sheet compatibility; duplicate marking is controlled globally |
 
 `individual`, `read_group`, and `library` may contain only letters, numbers,
 periods, underscores, and hyphens. Read-group values must be globally unique.
@@ -261,17 +260,17 @@ oscillation is detected. Samples retire independently.
 
 | Parameter | Default |
 | --- | ---: |
-| `--gvcf_mode` | `BP_RESOLUTION` |
-| `--min_gq` | 20 |
+| `--freebayes_region_size` | 10,000,000 |
+| `--freebayes_gvcf_chunk` | 50 |
+| `--freebayes_min_alternate_count` | 2 |
+| `--freebayes_min_alternate_fraction` | 0.05 |
+| `--freebayes_use_best_n_alleles` | 4 |
 | `--min_qual` | 30 |
-| `--min_qd` | 2 |
-| `--min_mq` | 40 |
-| `--max_snp_fs` | 60 |
-| `--max_indel_fs` | 200 |
-| `--max_snp_sor` | 3 |
-| `--max_indel_sor` | 10 |
-| `--min_read_pos_rank_sum` | -8 |
-| `--min_mq_rank_sum` | -12.5 |
+| `--min_mqm` | 20 |
+| `--min_alt_mean_quality` | 20 |
+| `--balanced_alt_count` | 4 |
+| `--min_alt_strand_observations` | 1 |
+| `--min_alt_placement_observations` | 1 |
 | `--min_het_allele_fraction` | 0.20 |
 | `--max_het_major_fraction` | 0.80 |
 | `--min_hom_alt_fraction` | 0.90 |
@@ -280,6 +279,11 @@ oscillation is detected. Samples retire independently.
 These are starting points, not organism-independent truth. Calibrate them for
 coverage, divergence, library construction, assembly repetitiveness, expected
 heterozygosity, and available validation data.
+
+`--freebayes_region_size` controls SLURM parallelism. Each chromosome or
+scaffold is divided into non-overlapping regions of at most this size while
+respecting ploidy boundaries. FreeBayes itself uses one CPU per region, allowing
+Nextflow and SLURM to distribute regions independently.
 
 ### Depth and callability
 
@@ -296,9 +300,10 @@ heterozygosity, and available validation data.
 Thresholds are chromosome-specific and recalculated each round from positive
 depth observations. Sparse chromosomes use a genome-wide fallback.
 
-`BP_RESOLUTION` gives position-level reference-confidence records and is the
-default. Compressed `GVCF` mode saves storage but masks blocks conservatively
-using block-level `MIN_DP`.
+FreeBayes gVCF blocks establish whether the caller emitted evidence across each
+reference span. The default 50-base block size keeps files manageable. Exact
+low/high-depth masking is calculated independently at every base with
+`samtools depth`, so block compression cannot hide local coverage failures.
 
 ### Preprocessing
 
@@ -338,9 +343,9 @@ Principal per-sample outputs under `03.consensus/<sample>/` include:
 | `<sample>.noncallable_mask.bed` | Union mask |
 | `<sample>.noncallable_mask.reasons.bed` | Mask with failure reasons |
 
-Per-round outputs include BAMs, gVCFs, genotyped VCFs, iterative references,
-depth thresholds, filter metrics, reason-specific masks, alignment metrics,
-variant QC, and convergence statistics.
+Per-round outputs include BAMs, FreeBayes gVCFs, raw decomposed VCFs, iterative
+references, depth thresholds, filter metrics, reason-specific masks, SAMtools
+alignment and insert-size metrics, variant QC, and convergence statistics.
 
 ## QC interpretation
 
@@ -412,5 +417,6 @@ NXF_SYNTAX_PARSER=v1 nextflow run main.nf \
 
 ## License and citation
 
-If nf-FROG is used in published work, cite the versions of Nextflow, GATK, bwa-mem2, SAMtools,
+If nf-FROG is used in published work, cite the versions of Nextflow, FreeBayes,
+bwa-mem2, SAMtools,
 BCFtools, BEDTools, and fastp used for the analysis.

@@ -13,16 +13,12 @@ def parse_args():
     parser.add_argument("--chromosome", required=True)
     parser.add_argument("--thresholds", required=True)
     parser.add_argument("--het-mode", choices=("retain", "major", "iupac", "mask"), required=True)
-    parser.add_argument("--minimum-gq", type=int, default=20)
     parser.add_argument("--minimum-qual", type=float, default=30)
-    parser.add_argument("--minimum-qd", type=float, default=2.0)
-    parser.add_argument("--minimum-mq", type=float, default=40.0)
-    parser.add_argument("--maximum-snp-fs", type=float, default=60.0)
-    parser.add_argument("--maximum-indel-fs", type=float, default=200.0)
-    parser.add_argument("--maximum-snp-sor", type=float, default=3.0)
-    parser.add_argument("--maximum-indel-sor", type=float, default=10.0)
-    parser.add_argument("--minimum-read-pos-rank-sum", type=float, default=-8.0)
-    parser.add_argument("--minimum-mq-rank-sum", type=float, default=-12.5)
+    parser.add_argument("--minimum-mqm", type=float, default=20.0)
+    parser.add_argument("--minimum-alt-mean-quality", type=float, default=20.0)
+    parser.add_argument("--balanced-alt-count", type=int, default=4)
+    parser.add_argument("--minimum-alt-strand-observations", type=int, default=1)
+    parser.add_argument("--minimum-alt-placement-observations", type=int, default=1)
     parser.add_argument("--minimum-het-allele-fraction", type=float, default=0.2)
     parser.add_argument("--maximum-het-major-fraction", type=float, default=0.8)
     parser.add_argument("--minimum-hom-alt-fraction", type=float, default=0.9)
@@ -87,10 +83,65 @@ def resolve_major_genotype(gt, depths):
     return "/".join([str(winner)] * len(alleles))
 
 
-def add_threshold_failure(reasons, info, key, threshold, comparison, reason):
-    value = number(info.get(key))
-    if value is not None and comparison(value, threshold):
-        reasons.append(reason)
+def numeric_list(value, kind=float):
+    if value in (None, "", "."):
+        return []
+    return [number(item, kind) for item in value.split(",")]
+
+
+def allele_depths(sample):
+    if sample.get("AD") not in (None, "", "."):
+        return [number(value, int) or 0 for value in sample["AD"].split(",")]
+    reference_depth = number(sample.get("RO"), int)
+    alternate_depths = numeric_list(sample.get("AO"), int)
+    if reference_depth is None and not alternate_depths:
+        return []
+    return [reference_depth or 0] + [value or 0 for value in alternate_depths]
+
+
+def called_alt_indexes(alleles):
+    return sorted({allele - 1 for allele in alleles if allele > 0})
+
+
+def add_freebayes_evidence_failures(reasons, info, alt_indexes, args):
+    mqms = numeric_list(info.get("MQM"))
+    alt_counts = numeric_list(info.get("AO"), int)
+    alt_quality_sums = numeric_list(info.get("QA"))
+    strand_forward = numeric_list(info.get("SAF"), int)
+    strand_reverse = numeric_list(info.get("SAR"), int)
+    placement_left = numeric_list(info.get("RPL"), int)
+    placement_right = numeric_list(info.get("RPR"), int)
+
+    for index in alt_indexes:
+        mqm = mqms[index] if index < len(mqms) else None
+        if mqm is None or mqm < args.minimum_mqm:
+            reasons.append("LOW_ALT_MAPPING_QUALITY")
+
+        count = alt_counts[index] if index < len(alt_counts) else None
+        quality_sum = alt_quality_sums[index] if index < len(alt_quality_sums) else None
+        if count is None or count <= 0 or quality_sum is None:
+            reasons.append("MISSING_ALT_QUALITY")
+        elif quality_sum / count < args.minimum_alt_mean_quality:
+            reasons.append("LOW_ALT_BASE_QUALITY")
+
+        if count is not None and count >= args.balanced_alt_count:
+            forward = strand_forward[index] if index < len(strand_forward) else None
+            reverse = strand_reverse[index] if index < len(strand_reverse) else None
+            if (
+                forward is None
+                or reverse is None
+                or min(forward, reverse) < args.minimum_alt_strand_observations
+            ):
+                reasons.append("ALT_STRAND_BIAS")
+
+            left = placement_left[index] if index < len(placement_left) else None
+            right = placement_right[index] if index < len(placement_right) else None
+            if (
+                left is None
+                or right is None
+                or min(left, right) < args.minimum_alt_placement_observations
+            ):
+                reasons.append("ALT_READ_POSITION_BIAS")
 
 
 def load_exclusions(path, chromosome):
@@ -153,45 +204,10 @@ def main():
                 reasons.append("SITE_FILTER")
 
             info = parse_info(fields[7])
-            add_threshold_failure(reasons, info, "QD", args.minimum_qd, lambda value, limit: value < limit, "LOW_QD")
-            add_threshold_failure(reasons, info, "MQ", args.minimum_mq, lambda value, limit: value < limit, "LOW_MQ")
-            add_threshold_failure(
-                reasons,
-                info,
-                "FS",
-                args.maximum_snp_fs if is_snp else args.maximum_indel_fs,
-                lambda value, limit: value > limit,
-                "STRAND_BIAS_FS",
-            )
-            add_threshold_failure(
-                reasons,
-                info,
-                "SOR",
-                args.maximum_snp_sor if is_snp else args.maximum_indel_sor,
-                lambda value, limit: value > limit,
-                "STRAND_BIAS_SOR",
-            )
-            add_threshold_failure(
-                reasons,
-                info,
-                "ReadPosRankSum",
-                args.minimum_read_pos_rank_sum,
-                lambda value, limit: value < limit,
-                "READ_POSITION_BIAS",
-            )
-            add_threshold_failure(
-                reasons,
-                info,
-                "MQRankSum",
-                args.minimum_mq_rank_sum,
-                lambda value, limit: value < limit,
-                "MAPPING_QUALITY_BIAS",
-            )
 
             format_keys, sample_values, sample = parse_sample(fields[8], fields[9])
             gt = sample.get("GT")
             dp = number(sample.get("DP"), int)
-            gq = number(sample.get("GQ"), int)
             if gt is None or "." in gt:
                 reasons.append("GENOTYPE_NO_CALL")
             if dp is None:
@@ -200,13 +216,11 @@ def main():
                 reasons.append("LOW_DEPTH")
             elif dp > max_depth:
                 reasons.append("HIGH_DEPTH")
-            if gq is None or gq < args.minimum_gq:
-                reasons.append("LOW_GQ")
-
             alleles = [] if gt is None or "." in gt else genotype_alleles(gt)
-            depths = []
-            if sample.get("AD") not in (None, "", "."):
-                depths = [number(value, int) or 0 for value in sample["AD"].split(",")]
+            depths = allele_depths(sample)
+            add_freebayes_evidence_failures(
+                reasons, info, called_alt_indexes(alleles), args
+            )
             if alleles and not depths:
                 reasons.append("MISSING_ALLELE_DEPTH")
             elif alleles and depths:

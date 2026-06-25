@@ -12,8 +12,6 @@ def parse_args():
     parser.add_argument("--gvcf", required=True)
     parser.add_argument("--fai", required=True)
     parser.add_argument("--chromosome", required=True)
-    parser.add_argument("--thresholds", required=True)
-    parser.add_argument("--minimum-gq", type=int, default=20)
     parser.add_argument("--output", required=True)
     parser.add_argument("--stats", required=True)
     return parser.parse_args()
@@ -21,16 +19,6 @@ def parse_args():
 
 def open_text(path):
     return gzip.open(path, "rt") if path.endswith(".gz") else open(path)
-
-
-def load_thresholds(path, chromosome):
-    with open(path) as handle:
-        header = handle.readline().rstrip().split("\t")
-        for line in handle:
-            row = dict(zip(header, line.rstrip().split("\t")))
-            if row["chromosome"] == chromosome:
-                return int(row["min_depth"]), int(row["max_depth"])
-    raise SystemExit(f"No depth thresholds found for {chromosome}")
 
 
 def chromosome_length(path, chromosome):
@@ -83,7 +71,6 @@ def merge(intervals):
 
 def main():
     args = parse_args()
-    min_depth, max_depth = load_thresholds(args.thresholds, args.chromosome)
     chrom_length = chromosome_length(args.fai, args.chromosome)
 
     masks = []
@@ -100,28 +87,22 @@ def main():
             ref = fields[3]
             info = parse_info(fields[7])
             sample = parse_sample(fields[8], fields[9])
+            is_reference_block = fields[4] in (".", "<*>") and "END" in info
             end_1_based = int(info.get("END", position + len(ref) - 1))
             start = position - 1
             end = min(chrom_length, end_1_based)
             covered.append((start, end))
 
-            depth = numeric(sample.get("MIN_DP"))
-            if depth is None:
-                depth = numeric(sample.get("DP"))
-            gq = numeric(sample.get("GQ"))
+            depth = numeric(sample.get("DP"))
             gt = sample.get("GT")
 
             reasons = []
-            if gt is None or "." in gt:
+            if not is_reference_block and (gt is None or "." in gt):
                 reasons.append("GVCF_NO_CALL")
             if depth is None:
                 reasons.append("GVCF_NO_DEPTH")
-            elif depth < min_depth:
-                reasons.append("LOW_DEPTH")
-            elif depth > max_depth:
-                reasons.append("HIGH_DEPTH")
-            if args.minimum_gq > 0 and (gq is None or gq < args.minimum_gq):
-                reasons.append("LOW_GQ")
+            if is_reference_block and numeric(sample.get("RO")) is None:
+                reasons.append("GVCF_NO_REFERENCE_SUPPORT")
 
             for reason in sorted(set(reasons)):
                 masks.append((args.chromosome, start, end, reason))

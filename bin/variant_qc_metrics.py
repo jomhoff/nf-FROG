@@ -41,6 +41,14 @@ def main():
                 ad = sample.get("AD")
                 if ad and ad != ".":
                     depths = [int(value) if value not in ("", ".") else 0 for value in ad.split(",")]
+                elif sample.get("RO") not in (None, "", "."):
+                    depths = [int(sample["RO"])] + [
+                        int(value) if value not in ("", ".") else 0
+                        for value in sample.get("AO", "").split(",")
+                    ]
+                else:
+                    depths = []
+                if depths:
                     total = sum(depths)
                     if total:
                         het_ref_fractions.append(depths[0] / total)

@@ -9,8 +9,9 @@ nextflow.preview.recursion = true
  * Biological invariants:
  *   - Iterative mapping references remain SNP-only and are never masked.
  *   - Only passing homozygous ALT SNPs alter intermediate references.
- *   - Final consensus masking is the union of reference ambiguity, gVCF
- *     callability failures, rejected variants, and optional external masks.
+ *   - Final consensus masking is the union of reference ambiguity, FreeBayes
+ *     gVCF callability failures, exact depth failures, rejected variants,
+ *     and optional external masks.
  *   - Every rejected variant site is masked rather than reverting to REF.
  *   - Samples retire independently once their iterative reference converges.
  */
@@ -35,17 +36,18 @@ params.mark_duplicates = true
 params.kraken2_db = null
 params.kraken2_extra = ''
 
-params.gvcf_mode = 'BP_RESOLUTION'
-params.min_gq = 20
+params.freebayes_gvcf_chunk = 50
+params.freebayes_region_size = 10000000
+params.freebayes_min_alternate_count = 2
+params.freebayes_min_alternate_fraction = 0.05
+params.freebayes_use_best_n_alleles = 4
+params.freebayes_extra = ''
 params.min_qual = 30
-params.min_qd = 2.0
-params.min_mq = 40.0
-params.max_snp_fs = 60.0
-params.max_indel_fs = 200.0
-params.max_snp_sor = 3.0
-params.max_indel_sor = 10.0
-params.min_read_pos_rank_sum = -8.0
-params.min_mq_rank_sum = -12.5
+params.min_mqm = 20.0
+params.min_alt_mean_quality = 20.0
+params.balanced_alt_count = 4
+params.min_alt_strand_observations = 1
+params.min_alt_placement_observations = 1
 params.min_het_allele_fraction = 0.2
 params.max_het_major_fraction = 0.8
 params.min_hom_alt_fraction = 0.9
@@ -66,9 +68,6 @@ params.repeat_mask_bed = null
 params.low_mappability_bed = null
 params.exclusion_bed = null
 params.allow_reference_subset = false
-
-params.haplotypecaller_extra = ''
-params.genotypegvcfs_extra = ''
 
 def parseTsv(inputFile) {
     def lines = file(inputFile, checkIfExists: true)
@@ -201,7 +200,7 @@ process INDEX_REFERENCE {
     script:
     """
     samtools faidx ${reference}
-    gatk CreateSequenceDictionary -R ${reference} -O ${reference.simpleName}.dict
+    samtools dict -o ${reference.simpleName}.dict ${reference}
     bwa-mem2 index ${reference}
     """
 }
@@ -250,11 +249,12 @@ process MERGE_AND_MARK_DUPLICATES {
         ? "cp ${unit_bams[0]} merged.bam"
         : "samtools merge -@ ${task.cpus} -f merged.bam ${unit_bams.join(' ')}"
     def markCommand = params.mark_duplicates.toString().toBoolean()
-        ? """gatk MarkDuplicates \
-              -I merged.bam \
-              -O ${individual}.round${round}.bam \
-              -M ${individual}.round${round}.duplicate_metrics.txt \
-              --ASSUME_SORT_ORDER coordinate"""
+        ? """samtools collate -@ ${task.cpus} -O -u merged.bam |
+             samtools fixmate -@ ${task.cpus} -m -u - - |
+             samtools sort -@ ${task.cpus} -u - |
+             samtools markdup -@ ${task.cpus} -s \
+                 -f ${individual}.round${round}.duplicate_metrics.txt \
+                 - ${individual}.round${round}.bam"""
         : """cp merged.bam ${individual}.round${round}.bam
              printf 'DUPLICATES_NOT_MARKED\\n' > ${individual}.round${round}.duplicate_metrics.txt"""
     """
@@ -276,21 +276,18 @@ process ALIGNMENT_QC {
     output:
     tuple val(individual), val(round),
           path("${individual}.round${round}.flagstat.txt"),
-          path("${individual}.round${round}.alignment_summary.txt"),
-          path("${individual}.round${round}.insert_size_metrics.txt"),
-          path("${individual}.round${round}.insert_size.pdf")
+          path("${individual}.round${round}.alignment_stats.txt"),
+          path("${individual}.round${round}.insert_size_metrics.tsv")
 
     script:
     """
     samtools flagstat ${bam} > ${individual}.round${round}.flagstat.txt
-    gatk CollectAlignmentSummaryMetrics \
-        -R ${reference} -I ${bam} \
-        -O ${individual}.round${round}.alignment_summary.txt
-    gatk CollectInsertSizeMetrics \
-        -I ${bam} \
-        -O ${individual}.round${round}.insert_size_metrics.txt \
-        -H ${individual}.round${round}.insert_size.pdf \
-        --M 0.5
+    samtools stats -r ${reference} ${bam} > ${individual}.round${round}.alignment_stats.txt
+    {
+        printf 'insert_size\\tpairs\\tinward\\toutward\\tother\\n'
+        awk -F '\\t' '\$1 == "IS" {print \$2 "\\t" \$3 "\\t" \$4 "\\t" \$5 "\\t" \$6}' \
+            ${individual}.round${round}.alignment_stats.txt
+    } > ${individual}.round${round}.insert_size_metrics.tsv
     """
 }
 
@@ -321,13 +318,13 @@ process CALCULATE_DEPTH_THRESHOLDS {
     """
 }
 
-process HAPLOTYPECALLER_GVCF {
-    label 'gatk'
+process FREEBAYES_GVCF {
+    label 'calling'
     tag "${individual} round${round} ${interval} ploidy${ploidy}"
 
     input:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
-          val(shard_order), val(interval), val(ploidy), val(pcr_free),
+          val(shard_order), val(interval), val(ploidy),
           path(bam), path(bai), path(reference), path(fai), path(dict)
 
     output:
@@ -336,67 +333,61 @@ process HAPLOTYPECALLER_GVCF {
           path("${chrom_order}.${shard_order}.g.vcf.gz.tbi")
 
     script:
-    def pcrArgument = pcr_free ? '--pcr-indel-model NONE' : ''
     """
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" HaplotypeCaller \
-        -R ${reference} \
-        -I ${bam} \
-        -L '${interval}' \
-        --sample-ploidy ${ploidy} \
-        -ERC ${params.gvcf_mode.toString().toUpperCase()} \
-        --native-pair-hmm-threads ${task.cpus} \
-        ${pcrArgument} \
-        ${params.haplotypecaller_extra} \
-        -O ${chrom_order}.${shard_order}.g.vcf.gz
+    freebayes \
+        --fasta-reference ${reference} \
+        --region '${interval}' \
+        --ploidy ${ploidy} \
+        --gvcf \
+        --gvcf-chunk ${params.freebayes_gvcf_chunk} \
+        --min-mapping-quality ${params.mapq_min} \
+        --min-base-quality ${params.baseq_min} \
+        --min-alternate-count ${params.freebayes_min_alternate_count} \
+        --min-alternate-fraction ${params.freebayes_min_alternate_fraction} \
+        --use-best-n-alleles ${params.freebayes_use_best_n_alleles} \
+        ${params.freebayes_extra} \
+        ${bam} |
+      bgzip -c > ${chrom_order}.${shard_order}.g.vcf.gz
+    tabix -f -p vcf ${chrom_order}.${shard_order}.g.vcf.gz
     """
 }
 
-process GATHER_CHROMOSOME_GVCF {
-    label 'gatk'
+process GATHER_CHROMOSOME_CALLS {
+    label 'small'
     tag "${individual} round${round} ${chromosome}"
 
-    publishDir "${params.outputdir}/02.gvcfs/${individual}/round${round}", mode: 'copy'
+    publishDir "${params.outputdir}/02.gvcfs/${individual}/round${round}", mode: 'copy',
+        pattern: '*.g.vcf.gz*'
+    publishDir "${params.outputdir}/02.variants/${individual}/round${round}", mode: 'copy',
+        pattern: '*.raw.vcf.gz*'
 
     input:
-    tuple val(individual), val(round), val(chrom_order), val(chromosome), path(gvcfs)
+    tuple val(individual), val(round), val(chrom_order), val(chromosome),
+          path(gvcfs), path(reference), path(fai)
 
     output:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
           path("${chrom_order}.${chromosome}.g.vcf.gz"),
-          path("${chrom_order}.${chromosome}.g.vcf.gz.tbi")
+          path("${chrom_order}.${chromosome}.g.vcf.gz.tbi"),
+          path("${chrom_order}.${chromosome}.raw.vcf.gz"),
+          path("${chrom_order}.${chromosome}.raw.vcf.gz.tbi")
 
     script:
-    def inputs = gvcfs.sort { it.getName() }.collect { "-I ${it}" }.join(' ')
+    def inputs = gvcfs.sort { it.getName() }.join(' ')
     """
-    gatk GatherVcfs \
-        ${inputs} \
-        -O ${chrom_order}.${chromosome}.g.vcf.gz
-    """
-}
+    bcftools concat -Oz \
+        -o ${chrom_order}.${chromosome}.g.vcf.gz \
+        ${inputs}
+    tabix -f -p vcf ${chrom_order}.${chromosome}.g.vcf.gz
 
-process GENOTYPE_GVCF {
-    label 'gatk'
-    tag "${individual} round${round} ${chromosome}"
-
-    publishDir "${params.outputdir}/02.variants/${individual}/round${round}", mode: 'copy'
-
-    input:
-    tuple val(individual), val(round), val(chrom_order), val(chromosome),
-          path(gvcf), path(gvcf_tbi), path(reference), path(fai), path(dict)
-
-    output:
-    tuple val(individual), val(round), val(chrom_order), val(chromosome),
-          path("${chrom_order}.${chromosome}.genotyped.vcf.gz"),
-          path("${chrom_order}.${chromosome}.genotyped.vcf.gz.tbi")
-
-    script:
-    """
-    gatk --java-options "-Xmx${task.memory.toGiga()}g" GenotypeGVCFs \
-        -R ${reference} \
-        -V ${gvcf} \
-        -L '${chromosome}' \
-        ${params.genotypegvcfs_extra} \
-        -O ${chrom_order}.${chromosome}.genotyped.vcf.gz
+    bcftools view -e 'ALT="." || ALT="<*>"' ${chrom_order}.${chromosome}.g.vcf.gz |
+      bcftools norm \
+          -a \
+          -m -any \
+          -f ${reference} \
+          -Oz \
+          -o ${chrom_order}.${chromosome}.raw.vcf.gz
+    tabix -f -p vcf ${chrom_order}.${chromosome}.raw.vcf.gz
     """
 }
 
@@ -408,7 +399,7 @@ process MAKE_GVCF_MASK {
 
     input:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
-          path(gvcf), path(gvcf_tbi), path(thresholds), path(fai)
+          path(gvcf), path(gvcf_tbi), path(fai)
 
     output:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
@@ -421,10 +412,38 @@ process MAKE_GVCF_MASK {
         --gvcf ${gvcf} \
         --fai ${fai} \
         --chromosome '${chromosome}' \
-        --thresholds ${thresholds} \
-        --minimum-gq ${params.min_gq} \
         --output ${chrom_order}.${chromosome}.gvcf_mask.bed \
         --stats ${chrom_order}.${chromosome}.gvcf_mask_stats.tsv
+    """
+}
+
+process MAKE_DEPTH_MASK {
+    label 'small'
+    tag "${individual} round${round} ${chromosome} depth mask"
+
+    publishDir "${params.outputdir}/08.masks/${individual}/round${round}", mode: 'copy'
+
+    input:
+    tuple val(individual), val(round), val(chrom_order), val(chromosome),
+          path(bam), path(bai), path(thresholds)
+
+    output:
+    tuple val(individual), val(round), val(chrom_order), val(chromosome),
+          path("${chrom_order}.${chromosome}.depth_mask.bed"),
+          path("${chrom_order}.${chromosome}.depth_mask_stats.tsv")
+
+    script:
+    """
+    samtools depth -aa \
+        -Q ${params.mapq_min} \
+        -q ${params.baseq_min} \
+        -r '${chromosome}' \
+        ${bam} |
+      python3 "${projectDir}/bin/depth_mask.py" \
+        --chromosome '${chromosome}' \
+        --thresholds ${thresholds} \
+        --output ${chrom_order}.${chromosome}.depth_mask.bed \
+        --stats ${chrom_order}.${chromosome}.depth_mask_stats.tsv
     """
 }
 
@@ -474,16 +493,12 @@ process PREPARE_CONSENSUS_VCFS {
         --vcf ${vcf}
         --chromosome '${chromosome}'
         --thresholds ${thresholds}
-        --minimum-gq ${params.min_gq}
         --minimum-qual ${params.min_qual}
-        --minimum-qd ${params.min_qd}
-        --minimum-mq ${params.min_mq}
-        --maximum-snp-fs ${params.max_snp_fs}
-        --maximum-indel-fs ${params.max_indel_fs}
-        --maximum-snp-sor ${params.max_snp_sor}
-        --maximum-indel-sor ${params.max_indel_sor}
-        --minimum-read-pos-rank-sum ${params.min_read_pos_rank_sum}
-        --minimum-mq-rank-sum ${params.min_mq_rank_sum}
+        --minimum-mqm ${params.min_mqm}
+        --minimum-alt-mean-quality ${params.min_alt_mean_quality}
+        --balanced-alt-count ${params.balanced_alt_count}
+        --minimum-alt-strand-observations ${params.min_alt_strand_observations}
+        --minimum-alt-placement-observations ${params.min_alt_placement_observations}
         --minimum-het-allele-fraction ${params.min_het_allele_fraction}
         --maximum-het-major-fraction ${params.max_het_major_fraction}
         --minimum-hom-alt-fraction ${params.min_hom_alt_fraction}
@@ -562,7 +577,7 @@ process MERGE_FINAL_MASKS {
 
     input:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
-          path(gvcf_mask), path(variant_rejects), path(reference_mask),
+          path(gvcf_mask), path(depth_mask), path(variant_rejects), path(reference_mask),
           path(ploidy_mask),
           path(repeat_mask), path(mappability_mask), path(exclusion_mask)
 
@@ -577,6 +592,7 @@ process MERGE_FINAL_MASKS {
     python3 "${projectDir}/bin/merge_reason_masks.py" \
         --chromosome '${chromosome}' \
         --mask GVCF=${gvcf_mask} \
+        --mask DEPTH=${depth_mask} \
         --mask VARIANT=${variant_rejects} \
         --mask REFERENCE=${reference_mask} \
         --mask PLOIDY=${ploidy_mask} \
@@ -642,7 +658,9 @@ process COMPARE_REFERENCES {
 
     input:
     tuple val(individual), val(round),
-          path(previous_reference), path(current_reference), path(new_reference)
+          path(previous_reference, stageAs: 'previous_reference.fa'),
+          path(current_reference, stageAs: 'current_reference.fa'),
+          path(new_reference, stageAs: 'new_reference.fa')
 
     output:
     tuple val(individual), val(round),
@@ -737,7 +755,7 @@ process GATHER_FINAL_VCF {
 
     script:
     """
-    bcftools concat -a -Oz \
+    bcftools concat -Oz \
         -o ${individual}.final.current_reference.vcf.gz \
         ${vcfs.sort { it.getName() }.join(' ')}
     tabix -f -p vcf ${individual}.final.current_reference.vcf.gz
@@ -745,7 +763,7 @@ process GATHER_FINAL_VCF {
 }
 
 process GATHER_FINAL_GVCF {
-    label 'gatk'
+    label 'small'
     tag "${individual} final gVCF"
 
     publishDir "${params.outputdir}/03.consensus/${individual}", mode: 'copy'
@@ -759,9 +777,11 @@ process GATHER_FINAL_GVCF {
           path("${individual}.final.g.vcf.gz.tbi")
 
     script:
-    def inputs = gvcfs.sort { it.getName() }.collect { "-I ${it}" }.join(' ')
     """
-    gatk GatherVcfs ${inputs} -O ${individual}.final.g.vcf.gz
+    bcftools concat -Oz \
+        -o ${individual}.final.g.vcf.gz \
+        ${gvcfs.sort { it.getName() }.join(' ')}
+    tabix -f -p vcf ${individual}.final.g.vcf.gz
     """
 }
 
@@ -957,34 +977,32 @@ workflow CALL_ROUND {
 
     call_input_ch = MERGE_AND_MARK_DUPLICATES.out
         .combine(targets_ch, by: 0)
-        .combine(sample_meta_ch, by: 0)
         .combine(ref_tools_ch, by: 0)
         .map { individual, rnd, bam, bai, duplicate_metrics,
                chrom_order, chromosome, shard_order, interval, ploidy,
-               karyotype, default_ploidy, pcr_free,
                reference, fai, dict, current_ref, previous_ref ->
             tuple(individual, rnd, chrom_order, chromosome, shard_order, interval,
-                  ploidy, pcr_free, bam, bai, reference, fai, dict)
+                  ploidy, bam, bai, reference, fai, dict)
         }
-    HAPLOTYPECALLER_GVCF(call_input_ch)
+    FREEBAYES_GVCF(call_input_ch)
 
-    gathered_gvcf_input_ch = HAPLOTYPECALLER_GVCF.out
+    gathered_gvcf_input_ch = FREEBAYES_GVCF.out
         .groupTuple(by: [0, 1, 2, 3])
-        .map { individual, rnd, chrom_order, chromosome, shard_orders, gvcfs, tbis ->
-            tuple(individual, rnd, chrom_order, chromosome, gvcfs.flatten())
-        }
-    GATHER_CHROMOSOME_GVCF(gathered_gvcf_input_ch)
-
-    genotype_input_ch = GATHER_CHROMOSOME_GVCF.out
         .combine(ref_tools_ch, by: 0)
-        .map { individual, rnd, chrom_order, chromosome, gvcf, gvcf_tbi,
+        .map { individual, rnd, chrom_order, chromosome, shard_orders, gvcfs, tbis,
                reference, fai, dict, current_ref, previous_ref ->
-            tuple(individual, rnd, chrom_order, chromosome, gvcf, gvcf_tbi, reference, fai, dict)
+            tuple(individual, rnd, chrom_order, chromosome, gvcfs.flatten(), reference, fai)
         }
-    GENOTYPE_GVCF(genotype_input_ch)
-    VARIANT_QC(GENOTYPE_GVCF.out)
+    GATHER_CHROMOSOME_CALLS(gathered_gvcf_input_ch)
 
-    filter_input_ch = GENOTYPE_GVCF.out
+    raw_variants_ch = GATHER_CHROMOSOME_CALLS.out
+        .map { individual, rnd, chrom_order, chromosome,
+               gvcf, gvcf_tbi, raw_vcf, raw_vcf_tbi ->
+            tuple(individual, rnd, chrom_order, chromosome, raw_vcf, raw_vcf_tbi)
+        }
+    VARIANT_QC(raw_variants_ch)
+
+    filter_input_ch = raw_variants_ch
         .combine(active_thresholds_ch, by: 0)
         .combine(ploidy_masks_ch.map { individual, chrom_order, chromosome, mask ->
             tuple(individual, round, chrom_order, chromosome, mask)
@@ -994,14 +1012,23 @@ workflow CALL_ROUND {
         }
     PREPARE_CONSENSUS_VCFS(filter_input_ch)
 
-    gvcf_mask_input_ch = GATHER_CHROMOSOME_GVCF.out
-        .combine(active_thresholds_ch, by: 0)
+    gvcf_mask_input_ch = GATHER_CHROMOSOME_CALLS.out
         .combine(ref_tools_ch, by: 0)
-        .map { individual, rnd, chrom_order, chromosome, gvcf, gvcf_tbi,
-               thresholds, reference, fai, dict, current_ref, previous_ref ->
-            tuple(individual, rnd, chrom_order, chromosome, gvcf, gvcf_tbi, thresholds, fai)
+        .map { individual, rnd, chrom_order, chromosome,
+               gvcf, gvcf_tbi, raw_vcf, raw_vcf_tbi,
+               reference, fai, dict, current_ref, previous_ref ->
+            tuple(individual, rnd, chrom_order, chromosome, gvcf, gvcf_tbi, fai)
         }
     MAKE_GVCF_MASK(gvcf_mask_input_ch)
+
+    depth_mask_input_ch = MERGE_AND_MARK_DUPLICATES.out
+        .combine(chromosome_meta_ch)
+        .combine(active_thresholds_ch, by: 0)
+        .map { individual, rnd, bam, bai, duplicate_metrics,
+               chrom_order, chromosome, thresholds ->
+            tuple(individual, rnd, chrom_order, chromosome, bam, bai, thresholds)
+        }
+    MAKE_DEPTH_MASK(depth_mask_input_ch)
 
     reference_mask_input_ch = chromosome_meta_ch
         .combine(ref_tools_ch)
@@ -1011,6 +1038,7 @@ workflow CALL_ROUND {
     MAKE_REFERENCE_MASK(reference_mask_input_ch)
 
     final_mask_input_ch = MAKE_GVCF_MASK.out
+        .combine(MAKE_DEPTH_MASK.out, by: [0, 1, 2, 3])
         .combine(PREPARE_CONSENSUS_VCFS.out, by: [0, 1, 2, 3])
         .combine(MAKE_REFERENCE_MASK.out, by: [0, 1, 2, 3])
         .combine(ploidy_masks_ch.map { individual, chrom_order, chromosome, mask ->
@@ -1020,9 +1048,10 @@ workflow CALL_ROUND {
         .combine(mappability_mask_ch)
         .combine(exclusion_mask_ch)
         .map { individual, rnd, chrom_order, chromosome, gvcf_mask, gvcf_stats,
+               depth_mask, depth_stats,
                iterative_vcf, iterative_tbi, final_vcf, final_tbi, variant_rejects, filter_stats,
                reference_mask, ploidy_mask, repeat_mask, mappability_mask, exclusion_mask ->
-            tuple(individual, rnd, chrom_order, chromosome, gvcf_mask, variant_rejects,
+            tuple(individual, rnd, chrom_order, chromosome, gvcf_mask, depth_mask, variant_rejects,
                   reference_mask, ploidy_mask, repeat_mask, mappability_mask, exclusion_mask)
         }
     MERGE_FINAL_MASKS(final_mask_input_ch)
@@ -1080,17 +1109,16 @@ workflow CALL_ROUND {
 
     round_artifacts_ch = PREPARE_CONSENSUS_VCFS.out
         .combine(MERGE_FINAL_MASKS.out, by: [0, 1, 2, 3])
-        .combine(GATHER_CHROMOSOME_GVCF.out, by: [0, 1, 2, 3])
-        .combine(GENOTYPE_GVCF.out, by: [0, 1, 2, 3])
+        .combine(GATHER_CHROMOSOME_CALLS.out, by: [0, 1, 2, 3])
         .combine(ref_tools_ch, by: 0)
         .map { individual, rnd, chrom_order, chromosome,
                iterative_vcf, iterative_tbi, final_vcf, final_tbi, variant_rejects, filter_stats,
                final_mask, reason_mask, reason_files,
-               gvcf, gvcf_tbi, genotyped_vcf, genotyped_tbi,
+               gvcf, gvcf_tbi, raw_vcf, raw_vcf_tbi,
                reference, fai, dict, current_ref, previous_ref ->
             tuple(individual, rnd, chrom_order, chromosome,
                   final_vcf, final_tbi, final_mask, reason_mask,
-                  gvcf, gvcf_tbi, genotyped_vcf, genotyped_tbi,
+                  gvcf, gvcf_tbi, raw_vcf, raw_vcf_tbi,
                   reference, fai, dict, filter_stats)
         }
 
@@ -1192,9 +1220,15 @@ workflow {
     if (!(finalHetMode in ['iupac', 'major', 'mask'])) {
         error "--final_het_mode must be iupac, major, or mask"
     }
-    gvcfMode = params.gvcf_mode.toString().toUpperCase()
-    if (!(gvcfMode in ['GVCF', 'BP_RESOLUTION'])) {
-        error "--gvcf_mode must be GVCF or BP_RESOLUTION"
+    if ((params.freebayes_gvcf_chunk as int) < 1) {
+        error "--freebayes_gvcf_chunk must be at least 1"
+    }
+    if ((params.freebayes_region_size as int) < 1) {
+        error "--freebayes_region_size must be at least 1"
+    }
+    if ((params.freebayes_min_alternate_fraction as double) < 0 ||
+        (params.freebayes_min_alternate_fraction as double) > 1) {
+        error "--freebayes_min_alternate_fraction must be between 0 and 1"
     }
 
     referenceFile = file(params.ref_file, checkIfExists: true)
@@ -1317,21 +1351,31 @@ workflow {
                 rules = [[start: 1, end: referenceLengths[targetChromosome] as int, ploidy: sample.default_ploidy]]
             }
             def expectedStart = 1
-            rules.eachWithIndex { rule, shardIndex ->
+            def shardIndex = 0
+            rules.each { rule ->
                 if (rule.ploidy < 0 || rule.start != expectedStart || rule.end < rule.start || rule.end > referenceLengths[targetChromosome]) {
                     error "Ploidy intervals must form a complete, non-overlapping partition: ${sample.individual} ${targetChromosome}"
                 }
-                callTargets << [
-                    individual: sample.individual,
-                    chrom_order: String.format('%06d', chromosomeIndex),
-                    chromosome: targetChromosome,
-                    shard_order: String.format('%06d', shardIndex),
-                    interval: "${targetChromosome}:${rule.start}-${rule.end}",
-                    start: rule.start,
-                    end: rule.end,
-                    ploidy: Math.max(1, rule.ploidy),
-                    declared_ploidy: rule.ploidy
-                ]
+                def chunkStart = rule.start
+                while (chunkStart <= rule.end) {
+                    def chunkEnd = Math.min(
+                        rule.end as int,
+                        chunkStart + (params.freebayes_region_size as int) - 1
+                    )
+                    callTargets << [
+                        individual: sample.individual,
+                        chrom_order: String.format('%06d', chromosomeIndex),
+                        chromosome: targetChromosome,
+                        shard_order: String.format('%06d', shardIndex),
+                        interval: "${targetChromosome}:${chunkStart - 1}-${chunkEnd}",
+                        start: chunkStart,
+                        end: chunkEnd,
+                        ploidy: Math.max(1, rule.ploidy),
+                        declared_ploidy: rule.ploidy
+                    ]
+                    chunkStart = chunkEnd + 1
+                    shardIndex += 1
+                }
                 expectedStart = rule.end + 1
             }
             if (expectedStart != referenceLengths[targetChromosome] + 1) {
@@ -1354,9 +1398,9 @@ workflow {
             ]
         }
 
-    repeatMask = file(params.repeat_mask_bed ?: "${projectDir}/assets/empty.bed", checkIfExists: true)
-    mappabilityMask = file(params.low_mappability_bed ?: "${projectDir}/assets/empty.bed", checkIfExists: true)
-    exclusionMask = file(params.exclusion_bed ?: "${projectDir}/assets/empty.bed", checkIfExists: true)
+    repeatMask = file(params.repeat_mask_bed ?: "${projectDir}/assets/empty.repeat.bed", checkIfExists: true)
+    mappabilityMask = file(params.low_mappability_bed ?: "${projectDir}/assets/empty.mappability.bed", checkIfExists: true)
+    exclusionMask = file(params.exclusion_bed ?: "${projectDir}/assets/empty.exclusion.bed", checkIfExists: true)
 
     log.info """\
     ================================================================
@@ -1367,7 +1411,9 @@ workflow {
     maximum rounds          : ${maxRounds}
     minimum rounds          : ${minimumRounds}
     final heterozygotes     : ${finalHetMode}
-    reference confidence    : ${gvcfMode}
+    variant caller          : FreeBayes gVCF
+    calling region size     : ${params.freebayes_region_size}
+    gVCF block size         : ${params.freebayes_gvcf_chunk}
     trim reads              : ${params.trim_reads}
     mark duplicates         : ${params.mark_duplicates}
     subset reference        : ${params.allow_reference_subset}
@@ -1437,7 +1483,7 @@ workflow {
     final_chromosome_input_ch = RUN_ITERATIONS.out.final_artifacts
         .map { individual, rnd, chrom_order, chromosome,
                final_vcf, final_tbi, final_mask, reason_mask,
-               gvcf, gvcf_tbi, genotyped_vcf, genotyped_tbi,
+               gvcf, gvcf_tbi, raw_vcf, raw_vcf_tbi,
                reference, fai, dict, filter_stats ->
             tuple(individual, rnd, chrom_order, chromosome,
                   final_vcf, final_tbi, final_mask, reference, fai)
@@ -1455,7 +1501,7 @@ workflow {
         .groupTuple(by: 0)
         .map { individual, rounds, chrom_orders, chromosomes,
                final_vcfs, final_tbis, final_masks, reason_masks,
-               gvcfs, gvcf_tbis, genotyped_vcfs, genotyped_tbis,
+               gvcfs, gvcf_tbis, raw_vcfs, raw_vcf_tbis,
                references, fais, dicts, filter_stats ->
             tuple(individual, final_vcfs.flatten())
         }
@@ -1465,7 +1511,7 @@ workflow {
         .groupTuple(by: 0)
         .map { individual, rounds, chrom_orders, chromosomes,
                final_vcfs, final_tbis, final_masks, reason_masks,
-               gvcfs, gvcf_tbis, genotyped_vcfs, genotyped_tbis,
+               gvcfs, gvcf_tbis, raw_vcfs, raw_vcf_tbis,
                references, fais, dicts, filter_stats ->
             tuple(individual, gvcfs.flatten())
         }
@@ -1475,7 +1521,7 @@ workflow {
         .groupTuple(by: 0)
         .map { individual, rounds, chrom_orders, chromosomes,
                final_vcfs, final_tbis, final_masks, reason_masks,
-               gvcfs, gvcf_tbis, genotyped_vcfs, genotyped_tbis,
+               gvcfs, gvcf_tbis, raw_vcfs, raw_vcf_tbis,
                references, fais, dicts, filter_stats ->
             tuple(individual, final_masks.flatten(), reason_masks.flatten())
         }
