@@ -412,6 +412,5 @@ NXF_SYNTAX_PARSER=v1 nextflow run main.nf \
 
 ## License and citation
 
-Add the project's chosen license before public release. If nf-FROG is used in
-published work, cite the versions of Nextflow, GATK, bwa-mem2, SAMtools,
+If nf-FROG is used in published work, cite the versions of Nextflow, GATK, bwa-mem2, SAMtools,
 BCFtools, BEDTools, and fastp used for the analysis.
