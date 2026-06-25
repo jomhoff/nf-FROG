@@ -1,0 +1,28 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Nextflow runtime state
+.nextflow/
+.nextflow.log*
+work/
+cache/
+
+# Pipeline outputs
+results*/
+
+# Local environments
+.test-env/
+.conda/
+env/
+venv/
+
+# Generated smoke-test data and outputs
+tests/synthetic_run/
+
+# Editor and scheduler artifacts
+*.swp
+*.tmp
+*.out
+*.err
+slurm-*.out

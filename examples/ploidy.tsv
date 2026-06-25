@@ -1,0 +1,6 @@
+karyotype	chromosome	start	end	ploidy
+ZZ	chrZ	1	*	2
+ZZ	chrW	1	*	0
+ZW	chrZ	1	500000	2
+ZW	chrZ	500001	*	1
+ZW	chrW	1	*	1
