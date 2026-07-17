@@ -256,6 +256,18 @@ Resume an interrupted run with `-resume`.
 A sample converges when the change threshold is met and no two-cycle
 oscillation is detected. Samples retire independently.
 
+### Mapping resources
+
+| Parameter | Default | Meaning |
+| --- | ---: | --- |
+| `--samtools_sort_memory` | `1G` | Memory per samtools sort thread during read-unit BAM generation |
+
+The default SLURM mapping profile requests 8 CPUs and 96 GB RAM. Large
+references can exceed the earlier 16 CPU / 48 GB profile because `samtools sort`
+allocates memory per thread while `bwa-mem2` is also resident. If mapping jobs
+exit with status 137 or show `samtools sort ... Killed`, increase the mapping
+process memory in a site config and/or lower `--samtools_sort_memory`.
+
 ### Calling and filtering
 
 | Parameter | Default |

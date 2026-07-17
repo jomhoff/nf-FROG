@@ -33,6 +33,7 @@ params.convergence_max_changes = 0
 params.trim_reads = false
 params.fastp_extra = ''
 params.mark_duplicates = true
+params.samtools_sort_memory = '1G'
 params.kraken2_db = null
 params.kraken2_extra = ''
 
@@ -224,7 +225,7 @@ process MAP_READ_UNIT {
         -t ${task.cpus} \
         -R '@RG\\tID:${unit}\\tSM:${individual}\\tLB:${library}\\tPL:ILLUMINA' \
         ${reference} ${read1} ${read2} |
-      samtools sort -@ ${task.cpus} -m 2G -o ${unit}.bam
+      samtools sort -@ ${task.cpus} -m ${params.samtools_sort_memory} -o ${unit}.bam
     samtools index -@ ${task.cpus} ${unit}.bam
     """
 }
