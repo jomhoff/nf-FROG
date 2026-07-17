@@ -316,6 +316,9 @@ FreeBayes gVCF blocks establish whether the caller emitted evidence across each
 reference span. The default 50-base block size keeps files manageable. Exact
 low/high-depth masking is calculated independently at every base with
 `samtools depth`, so block compression cannot hide local coverage failures.
+Final mask merging uses a disk-backed sort/sweep so chromosomes with many
+small rejected or low-depth intervals do not require keeping all intervals in
+Python memory.
 
 ### Preprocessing
 
