@@ -61,7 +61,9 @@ rounds.
 ### Final consensus
 
 The final consensus is made from the reference used in the terminal calling
-round and the terminal filtered VCF. Its noncallable mask is the union of:
+round and the terminal filtered VCF. Passing VCF alleles are applied before the
+final mask, preserving VCF REF/FASTA agreement while still turning noncallable
+sites into `N`. Its noncallable mask is the union of:
 
 - gVCF-absent spans;
 - no-call or missing-depth records;

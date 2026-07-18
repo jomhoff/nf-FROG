@@ -703,17 +703,17 @@ process BUILD_FINAL_CHROMOSOME {
     script:
     """
     samtools faidx ${reference} '${chromosome}' > chromosome.unmasked.fa
-    bedtools maskfasta \
-        -fi chromosome.unmasked.fa \
-        -bed ${mask} \
-        -fo chromosome.masked.fa
-    samtools faidx chromosome.masked.fa
+    samtools faidx chromosome.unmasked.fa
     bcftools consensus \
-        -f chromosome.masked.fa \
+        -f chromosome.unmasked.fa \
         -s '${individual}' \
         -H I \
         ${vcf} \
-        -o ${chrom_order}.${chromosome}.consensus.fa
+        -o chromosome.consensus.unmasked.fa
+    bedtools maskfasta \
+        -fi chromosome.consensus.unmasked.fa \
+        -bed ${mask} \
+        -fo ${chrom_order}.${chromosome}.consensus.fa
     """
 }
 
