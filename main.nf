@@ -221,12 +221,20 @@ process MAP_READ_UNIT {
 
     script:
     """
+    set -euo pipefail
+
+    # Do not expose a partial BAM as a completed task output.
     bwa-mem2 mem \
         -t ${task.cpus} \
         -R '@RG\\tID:${unit}\\tSM:${individual}\\tLB:${library}\\tPL:ILLUMINA' \
         ${reference} ${read1} ${read2} |
-      samtools sort -@ ${task.cpus} -m ${params.samtools_sort_memory} -o ${unit}.bam
+      samtools sort -@ ${task.cpus} -m ${params.samtools_sort_memory} -o ${unit}.bam.partial
+
+    test -s ${unit}.bam.partial
+    samtools quickcheck -v ${unit}.bam.partial
+    mv ${unit}.bam.partial ${unit}.bam
     samtools index -@ ${task.cpus} ${unit}.bam
+    test -s ${unit}.bam.bai
     """
 }
 
@@ -259,9 +267,23 @@ process MERGE_AND_MARK_DUPLICATES {
         : """cp merged.bam ${individual}.round${round}.bam
              printf 'DUPLICATES_NOT_MARKED\\n' > ${individual}.round${round}.duplicate_metrics.txt"""
     """
+    set -euo pipefail
+
+    # Reject truncated or missing input BAMs before the merge/collate pipeline.
+    for input_bam in ${unit_bams.join(' ')}; do
+        test -s "\$input_bam" || { echo "ERROR: Missing or empty input BAM: \$input_bam" >&2; exit 1; }
+        samtools quickcheck -v "\$input_bam" || { echo "ERROR: Invalid input BAM: \$input_bam" >&2; exit 1; }
+    done
+
     ${mergeCommand}
+    test -s merged.bam
+    samtools quickcheck -v merged.bam
+
     ${markCommand}
+    test -s ${individual}.round${round}.bam
+    samtools quickcheck -v ${individual}.round${round}.bam
     samtools index -@ ${task.cpus} ${individual}.round${round}.bam
+    test -s ${individual}.round${round}.bam.bai
     """
 }
 
