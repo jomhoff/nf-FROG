@@ -254,17 +254,21 @@ process MERGE_AND_MARK_DUPLICATES {
           path("${individual}.round${round}.duplicate_metrics.txt")
 
     script:
-    def mergeCommand = unit_bams.size() == 1
-        ? "cp ${unit_bams[0]} merged.bam"
-        : "samtools merge -@ ${task.cpus} -f merged.bam ${unit_bams.join(' ')}"
+    // Avoid materializing a second full-size BAM for single-unit samples.
+    def bamInputs = unit_bams instanceof Collection ? unit_bams : [unit_bams]
+    def singleUnit = bamInputs.size() == 1
+    def mergedInput = singleUnit ? "${bamInputs[0]}" : "merged.bam"
+    def mergeCommand = singleUnit
+        ? ':'
+        : "samtools merge -@ ${task.cpus} -f merged.bam ${bamInputs.join(' ')}"
     def markCommand = params.mark_duplicates.toString().toBoolean()
-        ? """samtools collate -@ ${task.cpus} -O -u -T ./collate_tmp merged.bam |
+        ? """samtools collate -@ ${task.cpus} -O -u -T ./collate_tmp ${mergedInput} |
              samtools fixmate -@ ${task.cpus} -m -u - - |
              samtools sort -@ ${task.cpus} -u -T ./sort_tmp - |
              samtools markdup -@ ${task.cpus} -s \
                  -f ${individual}.round${round}.duplicate_metrics.txt \
                  - ${individual}.round${round}.bam"""
-        : """cp merged.bam ${individual}.round${round}.bam
+        : """cp ${mergedInput} ${individual}.round${round}.bam
              printf 'DUPLICATES_NOT_MARKED\\n' > ${individual}.round${round}.duplicate_metrics.txt"""
     """
     set -euo pipefail
@@ -279,8 +283,8 @@ process MERGE_AND_MARK_DUPLICATES {
     done
 
     ${mergeCommand}
-    test -s merged.bam
-    samtools quickcheck -v merged.bam
+    test -s ${mergedInput}
+    samtools quickcheck -v ${mergedInput}
 
     ${markCommand}
     test -s ${individual}.round${round}.bam
