@@ -258,9 +258,9 @@ process MERGE_AND_MARK_DUPLICATES {
         ? "cp ${unit_bams[0]} merged.bam"
         : "samtools merge -@ ${task.cpus} -f merged.bam ${unit_bams.join(' ')}"
     def markCommand = params.mark_duplicates.toString().toBoolean()
-        ? """samtools collate -@ ${task.cpus} -O -u merged.bam |
+        ? """samtools collate -@ ${task.cpus} -O -u -T ./collate_tmp merged.bam |
              samtools fixmate -@ ${task.cpus} -m -u - - |
-             samtools sort -@ ${task.cpus} -u - |
+             samtools sort -@ ${task.cpus} -u -T ./sort_tmp - |
              samtools markdup -@ ${task.cpus} -s \
                  -f ${individual}.round${round}.duplicate_metrics.txt \
                  - ${individual}.round${round}.bam"""
@@ -268,6 +268,9 @@ process MERGE_AND_MARK_DUPLICATES {
              printf 'DUPLICATES_NOT_MARKED\\n' > ${individual}.round${round}.duplicate_metrics.txt"""
     """
     set -euo pipefail
+
+    # Avoid the small per-user /tmp quota on Mendel. Use this task's work directory.
+    export TMPDIR="\$PWD"
 
     # Reject truncated or missing input BAMs before the merge/collate pipeline.
     for input_bam in ${unit_bams.join(' ')}; do
