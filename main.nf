@@ -250,15 +250,17 @@ process MERGE_AND_MARK_DUPLICATES {
         ? "cp ${unit_bams[0]} merged.bam"
         : "samtools merge -@ ${task.cpus} -f merged.bam ${unit_bams.join(' ')}"
     def markCommand = params.mark_duplicates.toString().toBoolean()
-        ? """samtools collate -@ ${task.cpus} -O -u merged.bam |
+        ? """samtools collate -@ ${task.cpus} -T \"\${TMPDIR}/collate\" -O -u merged.bam |
              samtools fixmate -@ ${task.cpus} -m -u - - |
-             samtools sort -@ ${task.cpus} -u - |
+             samtools sort -@ ${task.cpus} -T \"\${TMPDIR}/sort\" -u - |
              samtools markdup -@ ${task.cpus} -s \
                  -f ${individual}.round${round}.duplicate_metrics.txt \
                  - ${individual}.round${round}.bam"""
         : """cp merged.bam ${individual}.round${round}.bam
              printf 'DUPLICATES_NOT_MARKED\\n' > ${individual}.round${round}.duplicate_metrics.txt"""
     """
+    mkdir -p samtools_tmp
+    export TMPDIR="\$(pwd)/samtools_tmp"
     ${mergeCommand}
     ${markCommand}
     samtools index -@ ${task.cpus} ${individual}.round${round}.bam
