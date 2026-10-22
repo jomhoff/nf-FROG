@@ -32,6 +32,8 @@ params.convergence_max_changes = 0
 
 params.trim_reads = false
 params.fastp_extra = ''
+// Keep intermediate round BAMs in work/ unless explicit published copies are needed.
+params.publish_intermediate_bams = false
 params.mark_duplicates = true
 params.samtools_sort_memory = '1G'
 params.kraken2_db = null
@@ -122,7 +124,7 @@ process PREPROCESS_READ_UNIT {
     label 'preprocess'
     tag "${individual} ${unit}"
 
-    publishDir "${params.outputdir}/00.read_qc/${individual}", mode: 'copy'
+    publishDir "${params.outputdir}/00.read_qc/${individual}", mode: 'copy', pattern: '*.fastp.*'
 
     input:
     tuple val(individual), val(unit), path(read1), path(read2),
@@ -135,20 +137,31 @@ process PREPROCESS_READ_UNIT {
           path("${unit}.fastp.json"), path("${unit}.fastp.html")
 
     script:
-    def qcOnly = params.trim_reads.toString().toBoolean()
+    def doTrim = params.trim_reads.toString().toBoolean()
+    def qcOnly = '--disable_adapter_trimming --disable_quality_filtering --disable_length_filtering --disable_trim_poly_g'
+    def outputArgs = doTrim
+        ? "--out1 ${unit}.R1.fastq.gz --out2 ${unit}.R2.fastq.gz"
+        : ''
+    def qcOnlyArgs = doTrim ? '' : qcOnly
+    def reuseInputs = doTrim
         ? ''
-        : '--disable_adapter_trimming --disable_quality_filtering --disable_length_filtering --disable_trim_poly_g'
+        : """ln -s "\$(readlink -f ${read1})" ${unit}.R1.fastq.gz
+             ln -s "\$(readlink -f ${read2})" ${unit}.R2.fastq.gz"""
     """
-    fastp \
-        --in1 ${read1} \
-        --in2 ${read2} \
-        --out1 ${unit}.R1.fastq.gz \
-        --out2 ${unit}.R2.fastq.gz \
-        --json ${unit}.fastp.json \
-        --html ${unit}.fastp.html \
-        --thread ${task.cpus} \
-        ${qcOnly} \
+    set -euo pipefail
+    # Without trimming, fastp performs QC only and does not rewrite the reads.
+    fastp \\
+        --in1 ${read1} \\
+        --in2 ${read2} \\
+        ${outputArgs} \\
+        --json ${unit}.fastp.json \\
+        --html ${unit}.fastp.html \\
+        --thread ${task.cpus} \\
+        ${qcOnlyArgs} \\
         ${params.fastp_extra}
+    ${reuseInputs}
+    test -s ${unit}.R1.fastq.gz
+    test -s ${unit}.R2.fastq.gz
     """
 }
 
@@ -242,7 +255,12 @@ process MERGE_AND_MARK_DUPLICATES {
     label 'mapping'
     tag "${individual} round${round}"
 
-    publishDir "${params.outputdir}/01.bams/${individual}/round${round}", mode: 'copy'
+    // Publish compact QC metrics; full intermediate BAM copies are optional.
+    publishDir "${params.outputdir}/01.bams/${individual}/round${round}",
+        mode: 'copy', pattern: '*.duplicate_metrics.txt'
+    publishDir "${params.outputdir}/01.bams/${individual}/round${round}",
+        mode: 'copy', pattern: '*.bam*',
+        enabled: params.publish_intermediate_bams.toString().toBoolean()
 
     input:
     tuple val(individual), val(round), path(unit_bams)
