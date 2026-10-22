@@ -360,9 +360,28 @@ Principal per-sample outputs under `03.consensus/<sample>/` include:
 | `<sample>.noncallable_mask.bed` | Union mask |
 | `<sample>.noncallable_mask.reasons.bed` | Mask with failure reasons |
 
-Per-round outputs include BAMs, FreeBayes gVCFs, raw decomposed VCFs, iterative
+Per-round outputs include FreeBayes gVCFs, raw decomposed VCFs, iterative
 references, depth thresholds, filter metrics, reason-specific masks, SAMtools
 alignment and insert-size metrics, variant QC, and convergence statistics.
+Intermediate BAMs remain in the Nextflow `work/` directory for downstream tasks
+and resume, but are **not published** to the results directory by default.
+
+### Disk-space controls
+
+- With the default `--trim_reads false`, fastp performs QC without writing
+  duplicate FASTQs. The original paired FASTQs are reused for alignment; they
+  must remain accessible for the duration of the run and for `-resume`.
+  With `--trim_reads true`, processed FASTQs are still written.
+- With the default `--publish_intermediate_bams false`, duplicate-marking
+  metrics are published, but full per-round BAM and BAM-index copies are not.
+  To retain BAMs under `01.bams/`, run with
+  `--publish_intermediate_bams true`. This affects publication only, not
+  BAMs in `work/` or their role in downstream computation.
+- On Slurm, `MERGE_AND_MARK_DUPLICATES` is limited to two concurrent
+  tasks and the executor queue size is 25 to reduce simultaneous NAS I/O.
+
+Do not manually delete the `work/` directory during an active run; it holds
+files required for downstream stages and Nextflow caching.
 
 ## QC interpretation
 
