@@ -295,6 +295,16 @@ process MERGE_AND_MARK_DUPLICATES {
     """
     set -euo pipefail
 
+    # Reject truncated or missing input BAMs before the merge/collate pipeline.
+    for input_bam in ${unit_bams.join(' ')}; do
+        test -s "\$input_bam" || { echo "ERROR: Missing or empty input BAM: \$input_bam" >&2; exit 1; }
+        samtools quickcheck -v "\$input_bam" || { echo "ERROR: Invalid input BAM: \$input_bam" >&2; exit 1; }
+    done
+
+    ${mergeCommand}
+    test -s ${mergedInput}
+    samtools quickcheck -v ${mergedInput}
+
     # By default, avoid Mendel's small /tmp quota by using the work directory.
     tmp_prefix="\$PWD"
     if [[ "${params.use_node_local_scratch}" == "true" ]]; then
@@ -314,16 +324,6 @@ process MERGE_AND_MARK_DUPLICATES {
         fi
     fi
     export TMPDIR="\$tmp_prefix"
-
-    # Reject truncated or missing input BAMs before the merge/collate pipeline.
-    for input_bam in ${unit_bams.join(' ')}; do
-        test -s "\$input_bam" || { echo "ERROR: Missing or empty input BAM: \$input_bam" >&2; exit 1; }
-        samtools quickcheck -v "\$input_bam" || { echo "ERROR: Invalid input BAM: \$input_bam" >&2; exit 1; }
-    done
-
-    ${mergeCommand}
-    test -s ${mergedInput}
-    samtools quickcheck -v ${mergedInput}
 
     ${markCommand}
     test -s ${individual}.round${round}.bam
