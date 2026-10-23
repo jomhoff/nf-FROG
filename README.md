@@ -377,6 +377,23 @@ and resume, but are **not published** to the results directory by default.
   To retain BAMs under `01.bams/`, run with
   `--publish_intermediate_bams true`. This affects publication only, not
   BAMs in `work/` or their role in downstream computation.
+- With `--publish_intermediate_variants false` (default), intermediate
+  per-round gVCFs, raw VCFs and consensus VCFs are kept in Nextflow `work/`
+  but are not redundantly copied into results. Filter statistics and rejected
+  sites remain published, and final VCF/gVCF outputs are still published.
+  Use `--publish_intermediate_variants true` to restore published copies.
+- With `--publish_intermediate_references false` (default), intermediate
+  chromosome FASTAs, iterative reference FASTAs and comparison reference copies
+  remain in `work/` but are not additionally published. Convergence TSV/status
+  reports and final consensus FASTAs remain published. Use
+  `--publish_intermediate_references true` to restore published copies.
+- With `--use_node_local_scratch false` (default), samtools temporary files
+  are placed in the Nextflow task directory rather than the small local `/tmp`.
+  Optionally pass `--use_node_local_scratch true` **only if** Slurm provides
+  a writable, adequately sized `SLURM_TMPDIR` on compute nodes. The pipeline
+  checks for scratch availability (at least 3 times input BAM size), creates
+  an isolated temporary directory, and removes it after the task. This does
+  not move the final BAM or all Nextflow files onto node-local storage.
 - On Slurm, `MERGE_AND_MARK_DUPLICATES` is limited to two concurrent
   tasks and the executor queue size is 25 to reduce simultaneous NAS I/O.
 
