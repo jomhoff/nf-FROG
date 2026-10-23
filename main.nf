@@ -36,6 +36,8 @@ params.fastp_extra = ''
 params.publish_intermediate_bams = false
 params.publish_intermediate_variants = false
 params.publish_intermediate_references = false
+// Opt-in: use Slurm-provisioned node-local scratch for samtools temporary files.
+params.use_node_local_scratch = false
 params.mark_duplicates = true
 params.samtools_sort_memory = '1G'
 params.kraken2_db = null
@@ -282,9 +284,9 @@ process MERGE_AND_MARK_DUPLICATES {
         ? ':'
         : "samtools merge -@ ${task.cpus} -f merged.bam ${bamInputs.join(' ')}"
     def markCommand = params.mark_duplicates.toString().toBoolean()
-        ? """samtools collate -@ ${task.cpus} -O -u -T ./collate_tmp ${mergedInput} |
+        ? """samtools collate -@ ${task.cpus} -O -u -T "\$tmp_prefix/collate_tmp" ${mergedInput} |
              samtools fixmate -@ ${task.cpus} -m -u - - |
-             samtools sort -@ ${task.cpus} -u -T ./sort_tmp - |
+             samtools sort -@ ${task.cpus} -u -T "\$tmp_prefix/sort_tmp" - |
              samtools markdup -@ ${task.cpus} -s \
                  -f ${individual}.round${round}.duplicate_metrics.txt \
                  - ${individual}.round${round}.bam"""
@@ -293,8 +295,25 @@ process MERGE_AND_MARK_DUPLICATES {
     """
     set -euo pipefail
 
-    # Avoid the small per-user /tmp quota on Mendel. Use this task's work directory.
-    export TMPDIR="\$PWD"
+    # By default, avoid Mendel's small /tmp quota by using the work directory.
+    tmp_prefix="\$PWD"
+    if [[ "${params.use_node_local_scratch}" == "true" ]]; then
+        # Only use scratch explicitly allocated by Slurm, never shared /tmp.
+        if [[ -z "\${SLURM_TMPDIR:-}" || ! -d "\$SLURM_TMPDIR" || ! -w "\$SLURM_TMPDIR" ]]; then
+            echo "ERROR: --use_node_local_scratch requires a writable SLURM_TMPDIR" >&2
+            exit 1
+        fi
+        tmp_prefix="\$(mktemp -d "\$SLURM_TMPDIR/nf-frog-collate.XXXXXXXX")"
+        trap 'rm -rf "\$tmp_prefix"' EXIT
+        # Conservative scratch preflight: three times the merged input size.
+        input_bytes="\$(stat -Lc '%s' ${mergedInput})"
+        free_bytes="\$(df -PB1 "\$tmp_prefix" | awk 'NR==2 {print \$4}')"
+        if (( free_bytes < input_bytes * 3 )); then
+            echo "ERROR: Not enough node-local scratch for duplicate marking" >&2
+            exit 1
+        fi
+    fi
+    export TMPDIR="\$tmp_prefix"
 
     # Reject truncated or missing input BAMs before the merge/collate pipeline.
     for input_bam in ${unit_bams.join(' ')}; do
