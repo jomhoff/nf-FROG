@@ -34,6 +34,8 @@ params.trim_reads = false
 params.fastp_extra = ''
 // Keep intermediate round BAMs in work/ unless explicit published copies are needed.
 params.publish_intermediate_bams = false
+params.publish_intermediate_variants = false
+params.publish_intermediate_references = false
 params.mark_duplicates = true
 params.samtools_sort_memory = '1G'
 params.kraken2_db = null
@@ -405,9 +407,11 @@ process GATHER_CHROMOSOME_CALLS {
     tag "${individual} round${round} ${chromosome}"
 
     publishDir "${params.outputdir}/02.gvcfs/${individual}/round${round}", mode: 'copy',
-        pattern: '*.g.vcf.gz*'
+        pattern: '*.g.vcf.gz*',
+        enabled: params.publish_intermediate_variants.toString().toBoolean()
     publishDir "${params.outputdir}/02.variants/${individual}/round${round}", mode: 'copy',
-        pattern: '*.raw.vcf.gz*'
+        pattern: '*.raw.vcf.gz*',
+        enabled: params.publish_intermediate_variants.toString().toBoolean()
 
     input:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
@@ -521,7 +525,9 @@ process PREPARE_CONSENSUS_VCFS {
     label 'small'
     tag "${individual} round${round} ${chromosome}"
 
-    publishDir "${params.outputdir}/02.variants/${individual}/round${round}", mode: 'copy'
+    publishDir "${params.outputdir}/02.variants/${individual}/round${round}", mode: 'copy', pattern: '*.{bed,tsv}'
+    publishDir "${params.outputdir}/02.variants/${individual}/round${round}", mode: 'copy', pattern: '*.vcf.gz*',
+        enabled: params.publish_intermediate_variants.toString().toBoolean()
 
     input:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
@@ -655,7 +661,8 @@ process BUILD_ITERATIVE_CHROMOSOME {
     label 'small'
     tag "${individual} round${round} ${chromosome}"
 
-    publishDir "${params.outputdir}/05.round_consensus/${individual}/round${round}", mode: 'copy'
+    publishDir "${params.outputdir}/05.round_consensus/${individual}/round${round}", mode: 'copy',
+        enabled: params.publish_intermediate_references.toString().toBoolean()
 
     input:
     tuple val(individual), val(round), val(chrom_order), val(chromosome),
@@ -681,7 +688,8 @@ process BUILD_ITERATIVE_REFERENCE {
     label 'small'
     tag "${individual} round${round}"
 
-    publishDir "${params.outputdir}/04.consensus_refs/${individual}", mode: 'copy'
+    publishDir "${params.outputdir}/04.consensus_refs/${individual}", mode: 'copy',
+        enabled: params.publish_intermediate_references.toString().toBoolean()
 
     input:
     tuple val(individual), val(round), path(chromosome_fastas)
@@ -702,7 +710,9 @@ process COMPARE_REFERENCES {
     label 'small'
     tag "${individual} round${round}"
 
-    publishDir "${params.outputdir}/07.qc/${individual}/round${round}", mode: 'copy'
+    publishDir "${params.outputdir}/07.qc/${individual}/round${round}", mode: 'copy', pattern: '*.{tsv,txt}'
+    publishDir "${params.outputdir}/07.qc/${individual}/round${round}", mode: 'copy', pattern: '*.fa',
+        enabled: params.publish_intermediate_references.toString().toBoolean()
 
     input:
     tuple val(individual), val(round),
