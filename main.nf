@@ -29,6 +29,7 @@ params.outputdir = 'results_nf_FROG'
 params.max_rounds = 6
 params.minimum_rounds = 2
 params.convergence_max_changes = 0
+params.convergence_change_fraction = null
 
 params.trim_reads = false
 params.fastp_extra = ''
@@ -747,6 +748,9 @@ process COMPARE_REFERENCES {
           path("${individual}.round${round}.status.txt")
 
     script:
+    def fractionArgument = params.convergence_change_fraction != null
+        ? "--maximum-change-fraction ${params.convergence_change_fraction}"
+        : ''
     """
     cp ${new_reference} ${individual}.round${round}.next.fa
     cp ${current_reference} ${individual}.round${round}.current.fa
@@ -757,6 +761,7 @@ process COMPARE_REFERENCES {
         --round ${round} \
         --minimum-rounds ${params.minimum_rounds} \
         --maximum-changes ${params.convergence_max_changes} \
+        ${fractionArgument} \
         --metrics ${individual}.round${round}.convergence.tsv \
         --status ${individual}.round${round}.status.txt
     """
@@ -1294,6 +1299,11 @@ workflow {
         error "Require 1 <= --minimum_rounds <= --max_rounds"
     }
     finalHetMode = params.final_het_mode.toString().toLowerCase()
+    if (params.convergence_change_fraction != null &&
+        !((params.convergence_change_fraction as double) > 0 &&
+          (params.convergence_change_fraction as double) <= 1)) {
+        error "--convergence_change_fraction must be greater than 0 and at most 1"
+    }
     if (!(finalHetMode in ['iupac', 'major', 'mask'])) {
         error "--final_het_mode must be iupac, major, or mask"
     }

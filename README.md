@@ -254,9 +254,32 @@ Resume an interrupted run with `-resume`.
 | `--max_rounds` | 6 | Maximum mapping/calling rounds |
 | `--minimum_rounds` | 2 | Earliest round eligible for convergence |
 | `--convergence_max_changes` | 0 | Maximum changed bases at convergence |
+| `--convergence_change_fraction` | unset | Practical convergence: fewer than this fraction of reference bases change in each of two consecutive rounds |
 
 A sample converges when the change threshold is met and no two-cycle
 oscillation is detected. Samples retire independently.
+
+For practical convergence, use `--convergence_change_fraction 0.0001` (0.01%).
+This overrides the absolute-change rule and requires both the current and previous
+round to fall strictly below the threshold. The denominator is the full reference
+length, including ambiguous bases; it is not the callable fraction. Oscillations
+remain reported but do not block practical convergence. This is a stopping policy,
+not an accuracy estimate. Without this option the original rule remains unchanged.
+Each comparison also writes a `.convergence.details.json` sidecar in its work
+directory, distinguishing exact zero-change from practical convergence.
+
+For an already-running Nextflow experiment, a deliberately created
+`.frog-convergence-policy.json` in that experiment's work root applies to subsequent
+comparisons without restarting the workflow. For example:
+
+```json
+{"maximum_change_fraction": "0.0001", "consecutive_rounds": 2}
+```
+
+Existing round metrics are not rewritten. Record the activation round in the
+experiment methods. An explicit `--convergence_change_fraction` takes precedence
+over the work-root policy. Remove the policy file to return later comparisons to
+the command-line rule.
 
 ### Mapping resources
 
